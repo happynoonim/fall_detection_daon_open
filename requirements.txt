@@ -1,0 +1,46 @@
+# 다온 웹 서비스(webservice/) 배포용 의존성.
+#
+# main.py 파이프라인(실시간 낙상 감지, 아두이노, 얼굴인식)만 쓰려면
+# requirements-local.txt 를 설치하세요. 이 파일에는 서버가 실제로 쓰는 것만
+# 담습니다 — 배포 이미지 크기와 빌드 실패 위험을 줄이기 위해서입니다.
+#
+# 설치:
+#   pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
+#
+# --extra-index-url 이 필요한 이유: 기본 PyPI 의 torch 는 CUDA 런타임을 포함해
+# 2GB가 넘습니다. 서버에 GPU가 없으므로 CPU 전용 wheel 을 받으면 ~800MB 로 줄고
+# 무료/저가 인스턴스의 디스크·메모리 한도 안에 들어옵니다.
+
+# --- 웹 서버 ---
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
+websockets==12.0
+itsdangerous==2.2.0
+httpx==0.27.0
+python-multipart==0.0.9
+
+# --- 운영 모니터링 ---
+# SENTRY_DSN 이 없으면 임포트만 되고 아무 동작도 하지 않는다(observability.py).
+# [fastapi] 엑스트라가 starlette/fastapi 통합을 끌어온다 — 이게 있어야 에러에
+# '어떤 요청에서 났는지'가 붙는다. 순수 파이썬이라 이미지 크기는 ~2MB 만 는다.
+sentry-sdk[fastapi]==2.68.0
+
+# --- 컨설팅 분석 (YOLO11 사람 검출) ---
+# headless: 서버에는 GUI가 없다. GUI 빌드(opencv-contrib-python)는 libGL 등
+# 시스템 라이브러리를 요구해서 슬림 이미지에서 임포트가 실패한다.
+opencv-python-headless==4.11.0.86
+ultralytics==8.4.0
+numpy==1.26.4
+
+# --- 내 카메라 체험 (/ws/live/self) ---
+# 포즈 추출은 브라우저(MediaPipe Tasks JS)가 하므로 서버에는 mediapipe 가
+# 필요 없습니다. 서버는 랜드마크를 받아 분류기만 돌립니다.
+# 버전 고정 이유: 모델(joblib)은 학습 당시 sklearn 버전으로 피클되어 있어
+# 메이저가 다르면 로드가 깨질 수 있습니다.
+scikit-learn==1.5.1
+joblib==1.4.2
+pandas==2.2.2
+
+# mediapipe 는 여기 없습니다. 실시간 낙상 감지(main.py)만 쓰고 웹 서비스는
+# 임포트조차 하지 않습니다 — mediapipe 하나만 200MB가 넘습니다.
+# 부스 시연용 파이프라인은 requirements-local.txt 로 설치하세요.

@@ -1,0 +1,190 @@
+#include <Wire.h>
+#include <Adafruit_PWMServoDriver.h>
+// strtok, strcmp, strncmp / atoi. Arduino 코어가 전이적으로 끌어오는 경우가 많지만
+// 보드와 코어 버전에 따라 다르므로 명시한다.
+#include <string.h>
+#include <stdlib.h>
+
+Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
+
+#define NUM_SERVOS 4
+const int SERVO_CH[NUM_SERVOS] = {1, 3, 5, 7};  // 타일 0~3 이 연결된 PCA9685 채널
+const int COVER_CH[NUM_SERVOS] = {2, 4, 6, 8};  // 각 타일의 덮개 서보 (타일 i 와 세트)
+
+// 덮개 1, 3 은 0, 2 와 반대편에 장착돼 있어 여는 회전 방향을 뒤집는다.
+// 타일 서보는 넷 다 같은 방향 그대로다. 덮개만 해당된다.
+const bool COVER_INVERT[NUM_SERVOS] = {false, true, false, true};
+
+// 일반적인 서보 기준값 (필요시 미세조정)
+#define SERVO_MIN  102    // 약 0도, 0.5ms 펄스
+#define SERVO_MAX  512    // 약 180도, 2.5ms 펄스
+
+#define HOME_ANGLE     0   // 타일 초기/복귀 위치
+#define MOVE_ANGLE    48   // 타일 작동 위치
+#define COVER_CLOSED   0   // 덮개 닫힘
+#define COVER_OPEN    90   // 덮개 열림 (90도 회전)
+
+// 발사: 덮개가 90도 열릴 때까지 기다리는 시간.
+// 타일이 덮개를 치면 늘리고, 더 빠른 서보면 줄인다.
+// ponytail: 물리 튜닝값. 하드웨어에 맞춰 조정하는 손잡이.
+#define FIRE_DELAY_MS 300
+
+// 복귀: 타일이 다 내려갈 때까지 기다리는 시간.
+// 내려오는 쪽이 빨라 발사보다 짧아도 된다.
+#define RESET_DELAY_MS 200
+
+bool moved[NUM_SERVOS] = {false, false, false, false};
+
+// 줄 단위 프로토콜용 입력 버퍼
+#define BUF_SIZE 64
+char buf[BUF_SIZE];
+int bufLen = 0;
+
+int angleToPulse(int angle) {
+  return map(angle, 0, 180, SERVO_MIN, SERVO_MAX);
+}
+
+void moveServo(int index, int angle) {
+  pwm.setPWM(SERVO_CH[index], 0, angleToPulse(angle));
+}
+
+void moveCover(int index, int angle) {
+  // 반전 대상은 닫힘~열림 구간의 중심을 기준으로 대칭 이동시킨다.
+  // 회전 폭(90도)은 그대로고 방향만 반대가 된다. 명령 각도가 0~90 을
+  // 벗어나지 않아 서보 가동 범위 끝단에 걸릴 일도 없다.
+  int a = COVER_INVERT[index] ? (COVER_CLOSED + COVER_OPEN - angle) : angle;
+  pwm.setPWM(COVER_CH[index], 0, angleToPulse(a));
+}
+
+bool isAllDigits(const char *s) {
+  if (*s == '\0') return false;
+  for (const char *p = s; *p; p++) {
+    if (*p < '0' || *p > '9') return false;
+  }
+  return true;
+}
+
+// "0,2,3" 형식의 인자를 받아 해당 타일을 동시에 작동시킨다.
+// 하나라도 잘못된 값이 있으면 아무것도 움직이지 않고 ERR 을 반환한다.
+void handleFire(char *args) {
+  int wanted[NUM_SERVOS];
+  int count = 0;
+
+  char *token = strtok(args, ",");
+  while (token != NULL) {
+    while (*token == ' ') token++;
+    if (!isAllDigits(token)) {
+      Serial.println("ERR non-numeric tile");
+      return;
+    }
+    int idx = atoi(token);
+    if (idx < 0 || idx >= NUM_SERVOS) {
+      Serial.println("ERR tile out of range");
+      return;
+    }
+    if (count >= NUM_SERVOS) {
+      Serial.println("ERR too many tiles");
+      return;
+    }
+    wanted[count++] = idx;
+    token = strtok(NULL, ",");
+  }
+
+  if (count == 0) {
+    Serial.println("ERR no tiles");
+    return;
+  }
+
+  // 세트 서보를 먼저 열어 덮개를 치운 뒤 → 잠깐 기다렸다가 → 타일을 올린다.
+  // 여러 장이 동시에 발사돼도 지연은 한 번만 지불해 빠르게 유지한다.
+  for (int i = 0; i < count; i++) {
+    moveCover(wanted[i], COVER_OPEN);
+  }
+  delay(FIRE_DELAY_MS);
+  for (int i = 0; i < count; i++) {
+    moveServo(wanted[i], MOVE_ANGLE);
+    moved[wanted[i]] = true;
+  }
+
+  // 받은 인자를 그대로 되돌려준다. 파이썬이 "보낸 것"과 아두이노가 "이해한 것"의
+  // 일치를 확인할 수 있어야 한다.
+  Serial.print("OK FIRE ");
+  for (int i = 0; i < count; i++) {
+    if (i > 0) Serial.print(",");
+    Serial.print(wanted[i]);
+  }
+  Serial.println();
+}
+
+void handleReset() {
+  // 발사와 역순: 타일을 먼저 내리고 → 잠깐 기다렸다가 → 덮개를 닫는다.
+  // 그래야 내려가는 타일이 닫히는 덮개에 걸리지 않는다.
+  bool any = false;
+  for (int i = 0; i < NUM_SERVOS; i++) {
+    if (moved[i]) {
+      moveServo(i, HOME_ANGLE);
+      any = true;
+    }
+  }
+  if (any) {
+    delay(RESET_DELAY_MS);
+    for (int i = 0; i < NUM_SERVOS; i++) {
+      if (moved[i]) {
+        moveCover(i, COVER_CLOSED);
+        moved[i] = false;
+      }
+    }
+  }
+  Serial.println("OK RESET");
+}
+
+void handleLine(char *line) {
+  if (line[0] == '\0') return;
+
+  if (strncmp(line, "FIRE", 4) == 0 && (line[4] == ' ' || line[4] == '\0')) {
+    char *args = line + 4;
+    while (*args == ' ') args++;
+    handleFire(args);
+  } else if (strcmp(line, "RESET") == 0) {
+    handleReset();
+  } else if (strcmp(line, "PING") == 0) {
+    Serial.println("OK PING");
+  } else {
+    Serial.print("ERR unknown command: ");
+    Serial.println(line);
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  pwm.begin();
+  pwm.setPWMFreq(50);   // 서보는 50Hz
+  delay(500);
+
+  for (int i = 0; i < NUM_SERVOS; i++) {
+    moveServo(i, HOME_ANGLE);
+    moveCover(i, COVER_CLOSED);
+  }
+
+  // '#' 로 시작하는 줄은 파이썬 파서가 무시한다. 사람이 읽을 안내문을 남겨도 된다.
+  // 서보는 물리적으로 8개(타일 4 + 덮개 4)지만 READY 는 타일 수만 보고한다.
+  Serial.println("# 초기화 완료. 타일 0~3 = HOME, 덮개 = 닫힘.");
+  Serial.println("# 덮개 1, 3 은 반전 버전 (여는 방향 반대).");
+  Serial.println("# 명령: FIRE 0,2 / RESET / PING");
+  Serial.print("READY ");
+  Serial.println(NUM_SERVOS);
+}
+
+void loop() {
+  while (Serial.available() > 0) {
+    char c = Serial.read();
+    if (c == '\r') continue;
+    if (c == '\n') {
+      buf[bufLen] = '\0';
+      handleLine(buf);
+      bufLen = 0;
+    } else if (bufLen < BUF_SIZE - 1) {
+      buf[bufLen++] = c;
+    }
+  }
+}
