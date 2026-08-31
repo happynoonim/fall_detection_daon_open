@@ -1,7 +1,8 @@
 # Fall Detection using OpenCV and MediaPipe
 This project is aimed at developing a fall detection system using OpenCV and MediaPipe libraries in Python. The system detects falls by monitoring the movements of individuals captured in live video feeds and triggers an alert when a fall is detected. The implementation involves capturing the video using OpenCV, marking landmarks using MediaPipe, and analyzing the movements to identify falls.
 
-▶ 바로 써보기 https://da-on.up.railway.app/
+**▶ 바로 써보기 https://da-on.up.railway.app/**
+
 
 ## 빠른 시작 — 다온 웹 플랫폼
 
